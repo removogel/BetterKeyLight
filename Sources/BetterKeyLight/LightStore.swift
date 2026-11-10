@@ -5,52 +5,118 @@ import ServiceManagement
 
 @MainActor
 final class LightStore: ObservableObject {
-    // MARK: Einstellungen (persistiert)
-    @Published var host: String { didSet { defaults.set(host, forKey: "host"); refreshSoon() } }
-    @Published var port: Int { didSet { defaults.set(port, forKey: "port"); refreshSoon() } }
+    // MARK: Settings (persisted)
+    @Published var host: String { didSet { defaults.set(host, forKey: "host"); addressChanged() } }
+    @Published var port: Int { didSet { defaults.set(port, forKey: "port"); addressChanged() } }
+    /// Bonjour name of the selected light; lets the app follow it when its IP changes.
+    @Published var serviceName: String { didSet { defaults.set(serviceName, forKey: "serviceName") } }
     @Published var scheduleEnabled: Bool { didSet { defaults.set(scheduleEnabled, forKey: "scheduleEnabled") } }
-    @Published var schedules: [ScheduleEntry] { didSet { saveSchedules() } }
+    @Published var schedules: [ScheduleEntry] { didSet { save(schedules, key: "schedules") } }
+    @Published var presets: [Preset] { didSet { save(presets, key: "presets") } }
+    @Published var fadeEnabled: Bool { didSet { defaults.set(fadeEnabled, forKey: "fadeEnabled") } }
+    @Published var cameraEnabled: Bool { didSet { defaults.set(cameraEnabled, forKey: "cameraEnabled"); updateCameraTimer() } }
+    /// UUID string of the preset applied when the camera starts; empty = keep last settings.
+    @Published var cameraPresetID: String { didSet { defaults.set(cameraPresetID, forKey: "cameraPresetID") } }
+    @Published var sleepOffEnabled: Bool { didSet { defaults.set(sleepOffEnabled, forKey: "sleepOffEnabled") } }
+    @Published var wakeRestoreEnabled: Bool { didSet { defaults.set(wakeRestoreEnabled, forKey: "wakeRestoreEnabled") } }
 
-    // MARK: Leuchtenzustand
+    // MARK: Light state
     @Published var isOn = false
     @Published var brightness: Double = 50
     @Published var kelvin: Double = 4500
     @Published var reachable = false
     @Published var lastError: String?
     @Published var lastScheduleEvent: String?
+    @Published var info: AccessoryInfo?
+    @Published var discovered: [DiscoveredLight] = []
+    @Published var cameraActive = false
 
     private let defaults = UserDefaults.standard
+    private let discovery: Discovery
     private var pollTimer: Timer?
+    private var cameraTimer: Timer?
     private var sendTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
+    private var wakeTask: Task<Void, Never>?
     private var lastScheduleCheck = Date()
-    /// Verhindert, dass ein Poll während des Schiebens die Slider zurücksetzt.
+    /// Keeps a poll from resetting the sliders while the user is dragging them.
     private var suppressPollUntil = Date.distantPast
-    /// Zuletzt bekannter Zustand der Leuchte – verhindert unnötiges Zurücksenden.
+    /// Last state known to match the light; avoids sending it back unchanged.
     private var lastKnown: LightState?
+    /// True once the real state has been read from the light at least once.
+    private var stateLoaded = false
+    private var infoRequested = false
+
+    // Camera coupling
+    private var cameraIdleCount = 0
+    private var cameraTurnedOn = false
+
+    // Sleep / lock handling
+    private enum AwayReason { case systemSleep, screenSleep, locked }
+    private var awayReasons: Set<AwayReason> = []
+    private var sleepTurnedOff = false
 
     init() {
-        host = defaults.string(forKey: "host") ?? ""
-        let p = defaults.integer(forKey: "port")
+        let d = UserDefaults.standard
+        host = d.string(forKey: "host") ?? ""
+        let p = d.integer(forKey: "port")
         port = p == 0 ? 9123 : p
-        scheduleEnabled = defaults.object(forKey: "scheduleEnabled") as? Bool ?? true
-        if let data = defaults.data(forKey: "schedules"),
+        serviceName = d.string(forKey: "serviceName") ?? ""
+        scheduleEnabled = d.object(forKey: "scheduleEnabled") as? Bool ?? true
+        if let data = d.data(forKey: "schedules"),
            let list = try? JSONDecoder().decode([ScheduleEntry].self, from: data) {
             schedules = list
         } else {
             schedules = []
         }
+        if let data = d.data(forKey: "presets"),
+           let list = try? JSONDecoder().decode([Preset].self, from: data) {
+            presets = list
+        } else {
+            presets = Preset.defaults
+        }
+        fadeEnabled = d.object(forKey: "fadeEnabled") as? Bool ?? true
+        cameraEnabled = d.bool(forKey: "cameraEnabled")
+        cameraPresetID = d.string(forKey: "cameraPresetID") ?? ""
+        sleepOffEnabled = d.bool(forKey: "sleepOffEnabled")
+        wakeRestoreEnabled = d.object(forKey: "wakeRestoreEnabled") as? Bool ?? true
+        discovery = Discovery()
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
         pollTimer?.tolerance = 2
 
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.tick() }
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.setAway(.systemSleep, true) }
         }
+        workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.setAway(.systemSleep, false)
+                self?.setAway(.screenSleep, false)
+                self?.tick()
+            }
+        }
+        workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.setAway(.screenSleep, true) }
+        }
+        workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.setAway(.screenSleep, false) }
+        }
+        let distributed = DistributedNotificationCenter.default()
+        distributed.addObserver(forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.setAway(.locked, true) }
+        }
+        distributed.addObserver(forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.setAway(.locked, false) }
+        }
+
+        discovery.onChange = { [weak self] lights in
+            self?.discoveryChanged(lights)
+        }
+        discovery.start()
+        updateCameraTimer()
 
         Task { await refresh() }
     }
@@ -63,15 +129,77 @@ final class LightStore: ObservableObject {
                    temperature: ColorTemp.toAPI(kelvin: kelvin))
     }
 
-    // MARK: Abfragen
+    private func save<T: Encodable>(_ value: T, key: String) {
+        if let data = try? JSONEncoder().encode(value) {
+            defaults.set(data, forKey: key)
+        }
+    }
 
-    func refresh() async {
-        guard Date() >= suppressPollUntil else { return }
+    // MARK: Discovery
+
+    private func discoveryChanged(_ lights: [DiscoveredLight]) {
+        discovered = lights
+        if host.isEmpty {
+            // Nothing configured yet: adopt the first light that shows up.
+            if let first = lights.first { use(first) }
+        } else if serviceName.isEmpty {
+            // Manually configured light that we now recognise by name.
+            if let match = lights.first(where: { $0.host == host && $0.port == port }) {
+                serviceName = match.name
+            }
+        } else if let match = lights.first(where: { $0.name == serviceName }),
+                  match.host != host || match.port != port {
+            // The selected light got a new address: follow it.
+            host = match.host
+            port = match.port
+        }
+    }
+
+    func use(_ light: DiscoveredLight) {
+        serviceName = light.name
+        if host != light.host { host = light.host }
+        if port != light.port { port = light.port }
+    }
+
+    func isCurrent(_ light: DiscoveredLight) -> Bool {
+        light.host == host && light.port == port
+    }
+
+    /// Sets an address typed in by hand.
+    func setManual(host newHost: String, port newPort: Int) {
+        serviceName = discovered.first { $0.host == newHost && $0.port == newPort }?.name ?? ""
+        if host != newHost { host = newHost }
+        if port != newPort { port = newPort }
+    }
+
+    private func addressChanged() {
+        stateLoaded = false
+        lastKnown = nil
+        info = nil
+        infoRequested = false
+        refreshSoon()
+    }
+
+    // MARK: Reading
+
+    func refresh(force: Bool = false) async {
+        guard force || Date() >= suppressPollUntil else { return }
+        let c = client
         do {
-            let s = try await client.fetch()
+            let s = try await c.fetch()
+            guard c.host == host, c.port == port else { return }
+            // Skip the result if the user changed something while we were waiting.
+            guard force || Date() >= suppressPollUntil else { return }
             apply(s)
         } catch {
+            guard c.host == host, c.port == port else { return }
             fail(error)
+            return
+        }
+        if info == nil && !infoRequested {
+            infoRequested = true
+            let loaded = try? await c.fetchInfo()
+            if c.host == host, c.port == port { info = loaded }
         }
     }
 
@@ -80,7 +208,7 @@ final class LightStore: ObservableObject {
         refreshTask = Task {
             try? await Task.sleep(for: .milliseconds(600))
             guard !Task.isCancelled else { return }
-            await refresh()
+            await refresh(force: true)
         }
     }
 
@@ -89,6 +217,7 @@ final class LightStore: ObservableObject {
         brightness = Double(s.brightness)
         kelvin = Double(ColorTemp.toKelvin(s.temperature))
         lastKnown = currentState
+        stateLoaded = true
         reachable = true
         lastError = nil
     }
@@ -98,16 +227,39 @@ final class LightStore: ObservableObject {
         lastError = error.localizedDescription
     }
 
-    // MARK: Steuern
+    // MARK: Control
 
-    func setOn(_ on: Bool) {
-        isOn = on
-        push(debounce: false)
-    }
+    func setOn(_ on: Bool) { switchLight(on: on) }
 
     func toggle() { setOn(!isOn) }
 
-    /// Wird von den Slidern aufgerufen – sendet gedrosselt.
+    /// Switches the light and optionally sets brightness and color temperature.
+    /// Values that are not given are left as the light has them.
+    func switchLight(on: Bool, brightness newBrightness: Double? = nil,
+                     kelvin newKelvin: Double? = nil, animated: Bool = true) {
+        let wasOn = isOn
+        let known = stateLoaded
+        if let newBrightness { brightness = newBrightness }
+        if let newKelvin { kelvin = newKelvin }
+        isOn = on
+
+        if known {
+            if fadeEnabled && animated && wasOn != on {
+                fade(on: on)
+            } else {
+                push(debounce: false)
+            }
+        } else if newBrightness != nil && newKelvin != nil {
+            push(debounce: false)
+        } else {
+            // The light's real settings are unknown, so only send what was asked for.
+            sendPatch(LightPatch(on: on ? 1 : 0,
+                                 brightness: newBrightness.map { Int($0.rounded()) },
+                                 temperature: newKelvin.map { ColorTemp.toAPI(kelvin: $0) }))
+        }
+    }
+
+    /// Called by the sliders; sends with a short debounce.
     func valuesChanged() {
         guard currentState != lastKnown else { return }
         push(debounce: true)
@@ -116,6 +268,7 @@ final class LightStore: ObservableObject {
     private func push(debounce: Bool) {
         suppressPollUntil = Date().addingTimeInterval(2)
         let state = currentState
+        let c = client
         lastKnown = state
         sendTask?.cancel()
         sendTask = Task {
@@ -124,7 +277,7 @@ final class LightStore: ObservableObject {
                 guard !Task.isCancelled else { return }
             }
             do {
-                try await client.send(state)
+                try await c.send(state)
                 reachable = true
                 lastError = nil
             } catch {
@@ -133,7 +286,160 @@ final class LightStore: ObservableObject {
         }
     }
 
-    // MARK: Zeitsteuerung
+    private func sendPatch(_ patch: LightPatch) {
+        suppressPollUntil = Date().addingTimeInterval(2)
+        let c = client
+        lastKnown = currentState
+        sendTask?.cancel()
+        sendTask = Task {
+            do {
+                let result = try await c.send(patch)
+                guard !Task.isCancelled else { return }
+                if let result {
+                    apply(result)
+                } else {
+                    reachable = true
+                    lastError = nil
+                }
+            } catch {
+                if !Task.isCancelled { fail(error) }
+            }
+        }
+    }
+
+    /// Ramps the brightness up after switching on, or down before switching off.
+    private func fade(on: Bool) {
+        suppressPollUntil = Date().addingTimeInterval(4)
+        let target = max(3, Int(brightness.rounded()))
+        let temperature = ColorTemp.toAPI(kelvin: kelvin)
+        let c = client
+        lastKnown = currentState
+        sendTask?.cancel()
+        sendTask = Task {
+            let steps = 10
+            do {
+                for i in 1...steps {
+                    let t = Double(i) / Double(steps)
+                    let span = Double(target - 3)
+                    let level = on ? 3 + span * t : Double(target) - span * t
+                    try await c.send(LightState(on: 1, brightness: max(3, Int(level.rounded())), temperature: temperature))
+                    try await Task.sleep(for: .milliseconds(35))
+                }
+                if !on {
+                    // Switch off, but leave the brightness where it was for next time.
+                    try await c.send(LightState(on: 0, brightness: target, temperature: temperature))
+                }
+                reachable = true
+                lastError = nil
+            } catch {
+                if !Task.isCancelled { fail(error) }
+            }
+        }
+    }
+
+    // MARK: Presets
+
+    func applyPreset(_ preset: Preset) {
+        switchLight(on: true, brightness: Double(preset.brightness), kelvin: Double(preset.kelvin))
+    }
+
+    func isActive(_ preset: Preset) -> Bool {
+        isOn && Int(brightness.rounded()) == preset.brightness && Int(kelvin) == preset.kelvin
+    }
+
+    func addPresetFromCurrent() {
+        presets.append(Preset(name: "Preset \(presets.count + 1)",
+                              brightness: max(3, Int(brightness.rounded())),
+                              kelvin: Int(kelvin)))
+    }
+
+    func removePreset(_ id: UUID) {
+        if cameraPresetID == id.uuidString { cameraPresetID = "" }
+        presets.removeAll { $0.id == id }
+    }
+
+    // MARK: Camera coupling
+
+    private func updateCameraTimer() {
+        cameraTimer?.invalidate()
+        cameraTimer = nil
+        cameraIdleCount = 0
+        guard cameraEnabled else {
+            cameraActive = false
+            cameraTurnedOn = false
+            return
+        }
+        cameraTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkCamera() }
+        }
+        cameraTimer?.tolerance = 0.5
+        checkCamera()
+    }
+
+    private func checkCamera() {
+        if CameraMonitor.isAnyCameraRunning() {
+            cameraIdleCount = 0
+            guard !cameraActive else { return }
+            cameraActive = true
+            // Leave the light alone if it is already on.
+            guard !isOn else { return }
+            cameraTurnedOn = true
+            if let preset = presets.first(where: { $0.id.uuidString == cameraPresetID }) {
+                applyPreset(preset)
+            } else {
+                switchLight(on: true)
+            }
+        } else if cameraActive {
+            // Wait for two idle checks so a brief camera restart doesn't flicker the light.
+            cameraIdleCount += 1
+            guard cameraIdleCount >= 2 else { return }
+            cameraActive = false
+            if cameraTurnedOn {
+                cameraTurnedOn = false
+                if isOn { switchLight(on: false) }
+            }
+        }
+    }
+
+    // MARK: Sleep and screen lock
+
+    private func setAway(_ reason: AwayReason, _ active: Bool) {
+        let wasAway = !awayReasons.isEmpty
+        if active { awayReasons.insert(reason) } else { awayReasons.remove(reason) }
+        let isAway = !awayReasons.isEmpty
+        if isAway && !wasAway {
+            wentAway()
+        } else if !isAway && wasAway {
+            cameBack()
+        }
+    }
+
+    private func wentAway() {
+        wakeTask?.cancel()
+        guard sleepOffEnabled, isOn else { return }
+        sleepTurnedOff = true
+        // No fade here: the Mac may be asleep before a fade would finish.
+        switchLight(on: false, animated: false)
+    }
+
+    private func cameBack() {
+        guard sleepTurnedOff else { return }
+        sleepTurnedOff = false
+        guard sleepOffEnabled, wakeRestoreEnabled else { return }
+        wakeTask?.cancel()
+        wakeTask = Task {
+            // The network may need a moment after waking up.
+            for _ in 0..<8 {
+                if Task.isCancelled { return }
+                if (try? await client.fetch()) != nil { break }
+                try? await Task.sleep(for: .seconds(2))
+            }
+            guard !Task.isCancelled else { return }
+            switchLight(on: true)
+        }
+    }
+
+    // MARK: Schedule
 
     private func tick() {
         let now = Date()
@@ -143,7 +449,7 @@ final class LightStore: ObservableObject {
     }
 
     private func runSchedules(from start: Date, to end: Date) {
-        // Verpasste Ereignisse (z. B. im Ruhezustand) nur nachholen, wenn sie < 10 min her sind.
+        // Only catch up on missed rules (e.g. during sleep) if they are less than 10 minutes old.
         let from = max(start, end.addingTimeInterval(-600))
         let due = schedules
             .compactMap { e -> (ScheduleEntry, Date)? in
@@ -151,7 +457,7 @@ final class LightStore: ObservableObject {
                 return (e, d)
             }
             .sorted { $0.1 < $1.1 }
-        // Bei mehreren fälligen Einträgen zählt der zuletzt fällige.
+        // If several rules are due, the latest one wins.
         guard let (entry, _) = due.last else { return }
         execute(entry)
     }
@@ -159,12 +465,10 @@ final class LightStore: ObservableObject {
     func execute(_ entry: ScheduleEntry) {
         switch entry.action {
         case .on:
-            isOn = true
-            if entry.setBrightness { brightness = Double(entry.brightness) }
+            switchLight(on: true, brightness: entry.setBrightness ? Double(entry.brightness) : nil)
         case .off:
-            isOn = false
+            switchLight(on: false)
         }
-        push(debounce: false)
         let f = DateFormatter()
         f.dateFormat = "HH:mm"
         lastScheduleEvent = "\(f.string(from: Date())): \(entry.action.label)"
@@ -181,13 +485,7 @@ final class LightStore: ObservableObject {
 
     func removeSchedule(_ id: UUID) { schedules.removeAll { $0.id == id } }
 
-    private func saveSchedules() {
-        if let data = try? JSONEncoder().encode(schedules) {
-            defaults.set(data, forKey: "schedules")
-        }
-    }
-
-    // MARK: Bei Anmeldung starten
+    // MARK: Launch at login
 
     var launchAtLogin: Bool {
         get { SMAppService.mainApp.status == .enabled }
@@ -196,7 +494,7 @@ final class LightStore: ObservableObject {
                 if newValue { try SMAppService.mainApp.register() }
                 else { try SMAppService.mainApp.unregister() }
             } catch {
-                lastError = "Autostart: \(error.localizedDescription)"
+                lastError = "Launch at login: \(error.localizedDescription)"
             }
             objectWillChange.send()
         }

@@ -4,15 +4,19 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             ConnectionSettings()
-                .tabItem { Label("Verbindung", systemImage: "network") }
+                .tabItem { Label("Light", systemImage: "lightbulb") }
+            PresetSettings()
+                .tabItem { Label("Presets", systemImage: "slider.horizontal.3") }
+            AutomationSettings()
+                .tabItem { Label("Automation", systemImage: "wand.and.stars") }
             ScheduleSettings()
-                .tabItem { Label("Zeitsteuerung", systemImage: "clock") }
+                .tabItem { Label("Schedule", systemImage: "clock") }
         }
-        .frame(width: 520, height: 460)
+        .frame(width: 540, height: 520)
     }
 }
 
-// MARK: - Verbindung
+// MARK: - Light (discovery, address, device info)
 
 struct ConnectionSettings: View {
     @EnvironmentObject var store: LightStore
@@ -22,60 +26,228 @@ struct ConnectionSettings: View {
 
     var body: some View {
         Form {
-            Section("Elgato Key Light") {
-                TextField("IP-Adresse", text: $hostDraft, prompt: Text("z. B. 192.168.1.50"))
+            Section("Key Lights on your network") {
+                if store.discovered.isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Searching …").foregroundStyle(.secondary)
+                    }
+                }
+                ForEach(store.discovered) { light in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(light.name)
+                            Text("\(light.host):\(String(light.port))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if store.isCurrent(light) {
+                            Label("Selected", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        } else {
+                            Button("Use") { store.use(light) }
+                        }
+                    }
+                }
+            }
+
+            Section("Address") {
+                TextField("IP address", text: $hostDraft, prompt: Text("e.g. 192.168.1.50"))
                     .onSubmit(save)
                 TextField("Port", text: $portDraft, prompt: Text("9123"))
                     .onSubmit(save)
                 HStack {
-                    Button("Speichern & testen") { save() }
+                    Button("Save & Test") { save() }
                         .keyboardShortcut(.defaultAction)
                     if testing { ProgressView().controlSize(.small) }
                     Spacer()
                     status
                 }
-                Text("Die IP-Adresse findest du in der Elgato Control Center App unter den Geräteeinstellungen oder in deinem Router. Am besten im Router eine feste IP vergeben.")
+                Text("Lights found on your network are followed automatically when their IP address changes. Enter an address by hand only if the search does not find your light.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Section("Allgemein") {
-                Toggle("Bei Anmeldung starten", isOn: Binding(
-                    get: { store.launchAtLogin },
-                    set: { store.launchAtLogin = $0 }))
+
+            if let info = store.info {
+                Section("Device") {
+                    infoRow("Product", info.productName)
+                    infoRow("Name", info.displayName)
+                    infoRow("Serial number", info.serialNumber)
+                    infoRow("Firmware", firmware(info))
+                    infoRow("Board type", info.hardwareBoardType.map { String($0) })
+                    infoRow("MAC address", info.macAddress)
+                }
             }
         }
         .formStyle(.grouped)
-        .onAppear {
-            hostDraft = store.host
-            portDraft = String(store.port)
+        .onAppear(perform: syncDrafts)
+        .onChange(of: store.host) { syncDrafts() }
+        .onChange(of: store.port) { syncDrafts() }
+    }
+
+    @ViewBuilder
+    private func infoRow(_ title: String, _ value: String?) -> some View {
+        if let value, !value.isEmpty {
+            LabeledContent(title, value: value)
         }
+    }
+
+    private func firmware(_ info: AccessoryInfo) -> String? {
+        guard let version = info.firmwareVersion else { return nil }
+        if let build = info.firmwareBuildNumber { return "\(version) (build \(build))" }
+        return version
     }
 
     @ViewBuilder private var status: some View {
         if store.host.isEmpty {
             EmptyView()
         } else if store.reachable {
-            Label("Verbunden", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            Label("Connected", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
         } else {
-            Label(store.lastError ?? "Nicht erreichbar", systemImage: "xmark.circle.fill")
+            Label(store.lastError ?? "Not reachable", systemImage: "xmark.circle.fill")
                 .foregroundStyle(.red)
                 .lineLimit(1)
         }
     }
 
-    private func save() {
-        store.host = hostDraft.trimmingCharacters(in: .whitespaces)
-        store.port = Int(portDraft) ?? 9123
+    private func syncDrafts() {
+        hostDraft = store.host
         portDraft = String(store.port)
+    }
+
+    private func save() {
+        store.setManual(host: hostDraft.trimmingCharacters(in: .whitespaces),
+                        port: Int(portDraft) ?? 9123)
+        syncDrafts()
         testing = true
         Task {
-            await store.refresh()
+            await store.refresh(force: true)
             testing = false
         }
     }
 }
 
-// MARK: - Zeitsteuerung
+// MARK: - Presets
+
+struct PresetSettings: View {
+    @EnvironmentObject var store: LightStore
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Form {
+                Section("Presets") {
+                    if store.presets.isEmpty {
+                        Text("No presets yet. Set up the light the way you like it, then add it here.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach($store.presets) { $preset in
+                        PresetRow(preset: $preset) {
+                            store.applyPreset(preset)
+                        } delete: {
+                            store.removePreset(preset.id)
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+
+            HStack {
+                Spacer()
+                Button {
+                    store.addPresetFromCurrent()
+                } label: {
+                    Label("Add Current Settings as Preset", systemImage: "plus")
+                }
+            }
+            .padding([.horizontal, .bottom], 16)
+        }
+    }
+}
+
+struct PresetRow: View {
+    @Binding var preset: Preset
+    var apply: () -> Void
+    var delete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                TextField("Name", text: $preset.name)
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                Button(action: apply) { Image(systemName: "play.fill") }
+                    .buttonStyle(.borderless)
+                    .help("Apply now")
+                Button(role: .destructive, action: delete) { Image(systemName: "trash") }
+                    .buttonStyle(.borderless)
+                    .help("Delete preset")
+            }
+            HStack {
+                Image(systemName: "sun.max").foregroundStyle(.secondary).frame(width: 18)
+                Slider(value: Binding(get: { Double(preset.brightness) },
+                                      set: { preset.brightness = Int($0) }),
+                       in: 3...100, step: 1)
+                Text("\(preset.brightness) %")
+                    .monospacedDigit()
+                    .frame(width: 60, alignment: .trailing)
+            }
+            HStack {
+                Image(systemName: "thermometer.medium").foregroundStyle(.secondary).frame(width: 18)
+                Slider(value: Binding(get: { Double(preset.kelvin) },
+                                      set: { preset.kelvin = Int($0) }),
+                       in: ColorTemp.kelvinRange, step: 50)
+                Text("\(String(preset.kelvin)) K")
+                    .monospacedDigit()
+                    .frame(width: 60, alignment: .trailing)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Automation
+
+struct AutomationSettings: View {
+    @EnvironmentObject var store: LightStore
+
+    var body: some View {
+        Form {
+            Section("Switching") {
+                Toggle("Fade smoothly when turning on or off", isOn: $store.fadeEnabled)
+            }
+
+            Section("Camera") {
+                Toggle("Turn on while the camera is in use", isOn: $store.cameraEnabled)
+                Picker("When the camera starts", selection: $store.cameraPresetID) {
+                    Text("Keep last settings").tag("")
+                    ForEach(store.presets) { preset in
+                        Text(preset.name).tag(preset.id.uuidString)
+                    }
+                }
+                .disabled(!store.cameraEnabled)
+                Text("The light turns off again when the camera stops, unless it was already on before.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Sleep") {
+                Toggle("Turn off when the Mac sleeps or the screen locks", isOn: $store.sleepOffEnabled)
+                Toggle("Turn back on after waking or unlocking", isOn: $store.wakeRestoreEnabled)
+                    .disabled(!store.sleepOffEnabled)
+            }
+
+            Section("General") {
+                Toggle("Launch at login", isOn: Binding(
+                    get: { store.launchAtLogin },
+                    set: { store.launchAtLogin = $0 }))
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+// MARK: - Schedule
 
 struct ScheduleSettings: View {
     @EnvironmentObject var store: LightStore
@@ -84,11 +256,11 @@ struct ScheduleSettings: View {
         VStack(spacing: 0) {
             Form {
                 Section {
-                    Toggle("Zeitsteuerung aktiv", isOn: $store.scheduleEnabled)
+                    Toggle("Schedule enabled", isOn: $store.scheduleEnabled)
                 }
-                Section("Regeln") {
+                Section("Rules") {
                     if store.schedules.isEmpty {
-                        Text("Noch keine Regeln. Füge z. B. „Mo–Fr 08:00 einschalten“ hinzu.")
+                        Text("No rules yet. Add one such as “Mo–Fr 08:00 turn on”.")
                             .foregroundStyle(.secondary)
                     }
                     ForEach($store.schedules) { $entry in
@@ -105,13 +277,13 @@ struct ScheduleSettings: View {
 
             HStack {
                 if let ev = store.lastScheduleEvent {
-                    Text("Zuletzt ausgeführt: \(ev)").font(.caption).foregroundStyle(.secondary)
+                    Text("Last run: \(ev)").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button {
                     store.addSchedule()
                 } label: {
-                    Label("Regel hinzufügen", systemImage: "plus")
+                    Label("Add Rule", systemImage: "plus")
                 }
             }
             .padding([.horizontal, .bottom], 16)
@@ -149,10 +321,10 @@ struct ScheduleRow: View {
                 Spacer()
                 Button(action: runNow) { Image(systemName: "play.fill") }
                     .buttonStyle(.borderless)
-                    .help("Jetzt ausführen")
+                    .help("Run now")
                 Button(role: .destructive, action: delete) { Image(systemName: "trash") }
                     .buttonStyle(.borderless)
-                    .help("Regel löschen")
+                    .help("Delete rule")
             }
 
             HStack(spacing: 4) {
@@ -171,7 +343,7 @@ struct ScheduleRow: View {
 
             if entry.action == .on {
                 HStack {
-                    Toggle("Helligkeit setzen", isOn: $entry.setBrightness)
+                    Toggle("Set brightness", isOn: $entry.setBrightness)
                     Slider(value: Binding(get: { Double(entry.brightness) },
                                           set: { entry.brightness = Int($0) }),
                            in: 3...100, step: 1)

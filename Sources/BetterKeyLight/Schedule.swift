@@ -1,32 +1,38 @@
 import Foundation
 
-/// Ein Eintrag der zeitbasierten Steuerung.
+/// A saved combination of brightness and color temperature.
+struct Preset: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+    var brightness: Int   // 3...100
+    var kelvin: Int       // 2900...7000
+
+    static let defaults: [Preset] = [
+        Preset(name: "Video Call", brightness: 35, kelvin: 4800),
+        Preset(name: "Bright", brightness: 80, kelvin: 5600),
+        Preset(name: "Warm", brightness: 25, kelvin: 3200),
+    ]
+}
+
+/// One rule of the time-based schedule.
 struct ScheduleEntry: Codable, Identifiable, Equatable {
     enum Action: String, Codable, CaseIterable, Identifiable {
         case on, off
         var id: String { rawValue }
-        var label: String { self == .on ? "Einschalten" : "Ausschalten" }
+        var label: String { self == .on ? "Turn on" : "Turn off" }
     }
 
     var id = UUID()
     var enabled = true
     var hour = 8
     var minute = 0
-    /// Calendar-Wochentage: 1 = Sonntag ... 7 = Samstag
+    /// Calendar weekdays: 1 = Sunday ... 7 = Saturday
     var weekdays: Set<Int> = [2, 3, 4, 5, 6]
     var action: Action = .on
     var brightness: Int = 50
     var setBrightness = true
 
-    var timeString: String { String(format: "%02d:%02d", hour, minute) }
-
-    var summary: String {
-        var s = "\(timeString) – \(action.label)"
-        if action == .on && setBrightness { s += " (\(brightness) %)" }
-        return s
-    }
-
-    /// Nächster Auslösezeitpunkt ab `date`.
+    /// Next time this rule fires after `date`.
     func nextFire(after date: Date, calendar: Calendar = .current) -> Date? {
         guard enabled, !weekdays.isEmpty else { return nil }
         return weekdays.compactMap { wd in
@@ -38,8 +44,8 @@ struct ScheduleEntry: Codable, Identifiable, Equatable {
 }
 
 enum Weekday {
-    /// Reihenfolge Mo–So mit Calendar-Wochentagsnummern
+    /// Monday to Sunday with their Calendar weekday numbers.
     static let ordered: [(id: Int, short: String)] = [
-        (2, "Mo"), (3, "Di"), (4, "Mi"), (5, "Do"), (6, "Fr"), (7, "Sa"), (1, "So")
+        (2, "Mo"), (3, "Tu"), (4, "We"), (5, "Th"), (6, "Fr"), (7, "Sa"), (1, "Su")
     ]
 }

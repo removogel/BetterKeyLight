@@ -10,25 +10,26 @@ struct MenuView: View {
             header
 
             if store.host.isEmpty {
-                Text("Bitte zuerst die IP-Adresse des Key Light in den Einstellungen eintragen.")
+                Text("Searching for Key Lights on your network … You can also enter the address manually in Settings.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 controls
+                presets
             }
 
-            scheduleInfo
+            statusInfo
 
             Divider()
 
             HStack {
-                Button("Einstellungen …") {
+                Button("Settings …") {
                     openWindow(id: "settings")
                     NSApp.activate(ignoringOtherApps: true)
                 }
                 Spacer()
-                Button("Beenden") { NSApp.terminate(nil) }
+                Button("Quit") { NSApp.terminate(nil) }
             }
             .buttonStyle(.borderless)
         }
@@ -44,7 +45,7 @@ struct MenuView: View {
                 .foregroundStyle(store.isOn ? .yellow : .secondary)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Elgato Key Light").font(.headline)
+                Text(title).font(.headline).lineLimit(1)
                 HStack(spacing: 4) {
                     Circle()
                         .fill(store.reachable ? .green : .red)
@@ -63,21 +64,27 @@ struct MenuView: View {
         }
     }
 
+    private var title: String {
+        if let name = store.info?.displayName, !name.isEmpty { return name }
+        if let product = store.info?.productName, !product.isEmpty { return product }
+        return "Elgato Key Light"
+    }
+
     private var statusText: String {
-        if store.host.isEmpty { return "Nicht konfiguriert" }
-        if store.reachable { return "Verbunden · \(store.host)" }
-        return store.lastError ?? "Nicht erreichbar"
+        if store.host.isEmpty { return "Not configured" }
+        if store.reachable { return "Connected · \(store.host)" }
+        return store.lastError ?? "Not reachable"
     }
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            LabeledSlider(title: "Helligkeit",
+            LabeledSlider(title: "Brightness",
                           valueText: "\(Int(store.brightness)) %",
                           minIcon: "sun.min", maxIcon: "sun.max.fill") {
                 Slider(value: $store.brightness, in: 3...100, step: 1)
                     .onChange(of: store.brightness) { store.valuesChanged() }
             }
-            LabeledSlider(title: "Farbtemperatur",
+            LabeledSlider(title: "Color temperature",
                           valueText: "\(Int(store.kelvin)) K",
                           minIcon: "flame", maxIcon: "snowflake") {
                 Slider(value: $store.kelvin, in: ColorTemp.kelvinRange, step: 50)
@@ -86,8 +93,7 @@ struct MenuView: View {
             HStack {
                 ForEach([10, 25, 50, 75, 100], id: \.self) { v in
                     Button("\(v)%") {
-                        store.brightness = Double(v)
-                        if !store.isOn { store.setOn(true) }
+                        store.switchLight(on: true, brightness: Double(v))
                     }
                     .controlSize(.small)
                 }
@@ -98,10 +104,41 @@ struct MenuView: View {
     }
 
     @ViewBuilder
-    private var scheduleInfo: some View {
+    private var presets: some View {
+        if !store.presets.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Presets").font(.subheadline)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)],
+                          alignment: .leading, spacing: 6) {
+                    ForEach(store.presets) { preset in
+                        let active = store.isActive(preset)
+                        Button {
+                            store.applyPreset(preset)
+                        } label: {
+                            Text(preset.name)
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .controlSize(.small)
+                        .background(active ? Color.accentColor.opacity(0.3) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 5))
+                        .help("\(preset.brightness) % · \(preset.kelvin) K")
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusInfo: some View {
+        if store.cameraEnabled && store.cameraActive {
+            Label("Camera in use", systemImage: "video.fill")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
         if store.scheduleEnabled, let (entry, date) = store.nextScheduled {
             Label {
-                Text("Nächste Aktion: \(entry.action.label) \(date.formatted(.relative(presentation: .named)))")
+                Text("Next: \(entry.action.label) \(date.formatted(.relative(presentation: .named).locale(Locale(identifier: "en"))))")
             } icon: {
                 Image(systemName: "clock")
             }

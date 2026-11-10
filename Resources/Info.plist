@@ -6,13 +6,19 @@
     <key>CFBundleDisplayName</key><string>BetterKeyLight</string>
     <key>CFBundleIdentifier</key><string>de.local.betterkeylight</string>
     <key>CFBundleExecutable</key><string>BetterKeyLight</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>1.1</string>
+    <key>CFBundleVersion</key><string>2</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>BetterKeyLight steuert dein Elgato Key Light im lokalen Netzwerk.</string>
+    <string>BetterKeyLight finds and controls your Elgato Key Light on the local network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_elg._tcp</string>
+    </array>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key><true/>

@@ -14,7 +14,7 @@ struct BetterKeyLightApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Window("KeyLight Einstellungen", id: "settings") {
+        Window("BetterKeyLight Settings", id: "settings") {
             SettingsView()
                 .environmentObject(store)
         }
