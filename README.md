@@ -4,7 +4,7 @@ A small macOS menu bar app (macOS 14+) for controlling an Elgato Key Light or Ke
 
 ## Features
 
-- **Menu bar control** – on/off switch, brightness (3–100 %), color temperature (2900–7000 K) and quick brightness buttons. The light bulb icon is filled while the light is on.
+- **Menu bar control** – on/off switch, brightness (3–100 %), color temperature (2900–7000 K) and quick brightness buttons. The menu bar icon is filled while the light is on.
 - **Automatic discovery** – finds Key Lights on your network via Bonjour and sets itself up with the first one it sees. If the light later gets a new IP address, the app follows it. A manual address is still possible.
 - **Presets** – save combinations of brightness and color temperature and apply them with one click from the menu.
 - **Camera coupling** – turns the light on while any app uses the camera and off again afterwards, optionally with a preset. A light that was already on is left alone.

@@ -40,8 +40,8 @@ struct MenuView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: store.isOn ? "lightbulb.fill" : "lightbulb")
-                .font(.title2)
+            Image(nsImage: MenuBarIcon.make(on: store.isOn, size: 26))
+                .renderingMode(.template)
                 .foregroundStyle(store.isOn ? .yellow : .secondary)
                 .frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {

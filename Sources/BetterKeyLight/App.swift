@@ -10,7 +10,7 @@ struct BetterKeyLightApp: App {
             MenuView()
                 .environmentObject(store)
         } label: {
-            Image(systemName: store.isOn ? "lightbulb.fill" : "lightbulb")
+            Image(nsImage: MenuBarIcon.image(on: store.isOn))
         }
         .menuBarExtraStyle(.window)
 
