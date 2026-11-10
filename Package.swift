@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "KeyLightBar",
+    name: "BetterKeyLight",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "KeyLightBar", path: "Sources/KeyLightBar")
+        .executableTarget(name: "BetterKeyLight", path: "Sources/BetterKeyLight")
     ]
 )

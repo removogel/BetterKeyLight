@@ -1,4 +1,4 @@
-# KeyLight Bar
+# BetterKeyLight
 
 Eine kleine macOS-Menüleisten-App (macOS 14+) zur Steuerung eines Elgato Key Light über dessen lokale HTTP-API (`http://<IP>:9123/elgato/lights`).
 
@@ -12,7 +12,7 @@ Eine kleine macOS-Menüleisten-App (macOS 14+) zur Steuerung eines Elgato Key Li
 ```bash
 ./build.sh
 ```
-Ergebnis: `build/KeyLightBar.app` – nach `/Programme` ziehen und starten.
+Ergebnis: `build/BetterKeyLight.app` – nach `/Programme` ziehen und starten.
 Benötigt nur die Xcode Command Line Tools.
 
 ## Hinweise

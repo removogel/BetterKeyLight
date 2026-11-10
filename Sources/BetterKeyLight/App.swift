@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 @main
-struct KeyLightBarApp: App {
+struct BetterKeyLightApp: App {
     @StateObject private var store = LightStore()
 
     var body: some Scene {
