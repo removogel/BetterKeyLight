@@ -11,7 +11,7 @@ final class LightStore: ObservableObject {
     /// Bonjour name of the selected light; lets the app follow it when its IP changes.
     @Published var serviceName: String { didSet { defaults.set(serviceName, forKey: "serviceName") } }
     @Published var scheduleEnabled: Bool { didSet { defaults.set(scheduleEnabled, forKey: "scheduleEnabled") } }
-    @Published var schedules: [ScheduleEntry] { didSet { save(schedules, key: "schedules") } }
+    @Published var schedules: [ScheduleEntry] { didSet { nextCache = nil; save(schedules, key: "schedules") } }
     @Published var presets: [Preset] { didSet { save(presets, key: "presets") } }
     @Published var fadeEnabled: Bool { didSet { defaults.set(fadeEnabled, forKey: "fadeEnabled") } }
     @Published var cameraEnabled: Bool { didSet { defaults.set(cameraEnabled, forKey: "cameraEnabled"); updateCameraTimer() } }
@@ -19,6 +19,16 @@ final class LightStore: ObservableObject {
     @Published var cameraPresetID: String { didSet { defaults.set(cameraPresetID, forKey: "cameraPresetID") } }
     @Published var sleepOffEnabled: Bool { didSet { defaults.set(sleepOffEnabled, forKey: "sleepOffEnabled") } }
     @Published var wakeRestoreEnabled: Bool { didSet { defaults.set(wakeRestoreEnabled, forKey: "wakeRestoreEnabled") } }
+    @Published var idleOffEnabled: Bool { didSet { defaults.set(idleOffEnabled, forKey: "idleOffEnabled"); updateIdleTimer() } }
+    @Published var idleMinutes: Int { didSet { defaults.set(idleMinutes, forKey: "idleMinutes") } }
+    @Published var dayCycleEnabled: Bool {
+        didSet { defaults.set(dayCycleEnabled, forKey: "dayCycleEnabled"); dayCycleOverride = false; applyDayCycle() }
+    }
+    @Published var dayKelvin: Int { didSet { defaults.set(dayKelvin, forKey: "dayKelvin"); applyDayCycle() } }
+    @Published var nightKelvin: Int { didSet { defaults.set(nightKelvin, forKey: "nightKelvin"); applyDayCycle() } }
+    /// Minute of the day at which the light is fully cool / fully warm.
+    @Published var dayStartMinutes: Int { didSet { defaults.set(dayStartMinutes, forKey: "dayStartMinutes"); applyDayCycle() } }
+    @Published var nightStartMinutes: Int { didSet { defaults.set(nightStartMinutes, forKey: "nightStartMinutes"); applyDayCycle() } }
 
     // MARK: Light state
     @Published var isOn = false
@@ -33,12 +43,15 @@ final class LightStore: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let discovery: Discovery
+    let usage: UsageStats
     private var pollTimer: Timer?
     private var cameraTimer: Timer?
+    private var idleTimer: Timer?
     private var sendTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     private var wakeTask: Task<Void, Never>?
     private var lastScheduleCheck = Date()
+    private var nextCache: (validUntil: Date, value: (ScheduleEntry, Date)?)?
     /// Keeps a poll from resetting the sliders while the user is dragging them.
     private var suppressPollUntil = Date.distantPast
     /// Last state known to match the light; avoids sending it back unchanged.
@@ -50,11 +63,18 @@ final class LightStore: ObservableObject {
     // Camera coupling
     private var cameraIdleCount = 0
     private var cameraTurnedOn = false
+    private var cameraCheckRunning = false
 
     // Sleep / lock handling
-    private enum AwayReason { case systemSleep, screenSleep, locked }
+    private enum AwayReason { case systemSleep, screenSleep, locked, idle }
     private var awayReasons: Set<AwayReason> = []
     private var sleepTurnedOff = false
+    private var idleCheckRunning = false
+
+    // Day cycle
+    /// Set when the user picks a color temperature by hand; cleared when the light is next switched on.
+    private var dayCycleOverride = false
+    private var fadingUntil = Date.distantPast
 
     init() {
         let d = UserDefaults.standard
@@ -80,7 +100,16 @@ final class LightStore: ObservableObject {
         cameraPresetID = d.string(forKey: "cameraPresetID") ?? ""
         sleepOffEnabled = d.bool(forKey: "sleepOffEnabled")
         wakeRestoreEnabled = d.object(forKey: "wakeRestoreEnabled") as? Bool ?? true
+        idleOffEnabled = d.bool(forKey: "idleOffEnabled")
+        let idle = d.integer(forKey: "idleMinutes")
+        idleMinutes = idle == 0 ? 10 : idle
+        dayCycleEnabled = d.bool(forKey: "dayCycleEnabled")
+        dayKelvin = d.object(forKey: "dayKelvin") as? Int ?? 5600
+        nightKelvin = d.object(forKey: "nightKelvin") as? Int ?? 3200
+        dayStartMinutes = d.object(forKey: "dayStartMinutes") as? Int ?? 9 * 60
+        nightStartMinutes = d.object(forKey: "nightStartMinutes") as? Int ?? 21 * 60
         discovery = Discovery()
+        usage = UsageStats()
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
@@ -117,6 +146,7 @@ final class LightStore: ObservableObject {
         }
         discovery.start()
         updateCameraTimer()
+        updateIdleTimer()
 
         Task { await refresh() }
     }
@@ -212,19 +242,30 @@ final class LightStore: ObservableObject {
         }
     }
 
+    /// Assigns only when the value differs, so views are not redrawn for nothing.
+    private func set<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<LightStore, T>, _ value: T) {
+        if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
+    }
+
     private func apply(_ s: LightState) {
-        isOn = s.on == 1
-        brightness = Double(s.brightness)
-        kelvin = Double(ColorTemp.toKelvin(s.temperature))
+        set(\.isOn, s.on == 1)
+        set(\.brightness, Double(s.brightness))
+        set(\.kelvin, Double(ColorTemp.toKelvin(s.temperature)))
         lastKnown = currentState
         stateLoaded = true
-        reachable = true
-        lastError = nil
+        markReachable()
+        usage.record(isOn: isOn)
+    }
+
+    private func markReachable() {
+        set(\.reachable, true)
+        set(\.lastError, nil)
     }
 
     private func fail(_ error: Error) {
-        reachable = false
-        lastError = error.localizedDescription
+        set(\.reachable, false)
+        set(\.lastError, error.localizedDescription)
+        usage.record(isOn: false)
     }
 
     // MARK: Control
@@ -240,8 +281,16 @@ final class LightStore: ObservableObject {
         let wasOn = isOn
         let known = stateLoaded
         if let newBrightness { brightness = newBrightness }
-        if let newKelvin { kelvin = newKelvin }
+        if let newKelvin {
+            kelvin = newKelvin
+            dayCycleOverride = true
+        } else if on && !wasOn && dayCycleEnabled {
+            // Switching on starts with the color temperature for the current time of day.
+            dayCycleOverride = false
+            if known { kelvin = Double(cycleKelvin) }
+        }
         isOn = on
+        usage.record(isOn: on)
 
         if known {
             if fadeEnabled && animated && wasOn != on {
@@ -261,7 +310,10 @@ final class LightStore: ObservableObject {
 
     /// Called by the sliders; sends with a short debounce.
     func valuesChanged() {
-        guard currentState != lastKnown else { return }
+        let state = currentState
+        guard state != lastKnown else { return }
+        // A color temperature chosen by hand pauses the day cycle.
+        if let last = lastKnown, last.temperature != state.temperature { dayCycleOverride = true }
         push(debounce: true)
     }
 
@@ -278,8 +330,7 @@ final class LightStore: ObservableObject {
             }
             do {
                 try await c.send(state)
-                reachable = true
-                lastError = nil
+                markReachable()
             } catch {
                 if !Task.isCancelled { fail(error) }
             }
@@ -298,8 +349,7 @@ final class LightStore: ObservableObject {
                 if let result {
                     apply(result)
                 } else {
-                    reachable = true
-                    lastError = nil
+                    markReachable()
                 }
             } catch {
                 if !Task.isCancelled { fail(error) }
@@ -310,6 +360,7 @@ final class LightStore: ObservableObject {
     /// Ramps the brightness up after switching on, or down before switching off.
     private func fade(on: Bool) {
         suppressPollUntil = Date().addingTimeInterval(4)
+        fadingUntil = Date().addingTimeInterval(1.5)
         let target = max(3, Int(brightness.rounded()))
         let temperature = ColorTemp.toAPI(kelvin: kelvin)
         let c = client
@@ -329,12 +380,27 @@ final class LightStore: ObservableObject {
                     // Switch off, but leave the brightness where it was for next time.
                     try await c.send(LightState(on: 0, brightness: target, temperature: temperature))
                 }
-                reachable = true
-                lastError = nil
+                markReachable()
             } catch {
                 if !Task.isCancelled { fail(error) }
             }
         }
+    }
+
+    // MARK: Day cycle
+
+    /// Color temperature the day cycle asks for right now.
+    var cycleKelvin: Int {
+        DayCycle.kelvin(at: Date(), day: dayKelvin, night: nightKelvin,
+                        dayStart: dayStartMinutes, nightStart: nightStartMinutes)
+    }
+
+    private func applyDayCycle() {
+        guard dayCycleEnabled, !dayCycleOverride, isOn, stateLoaded, Date() >= fadingUntil else { return }
+        let target = Double(cycleKelvin)
+        guard target != kelvin else { return }
+        kelvin = target
+        push(debounce: true)
     }
 
     // MARK: Presets
@@ -376,8 +442,22 @@ final class LightStore: ObservableObject {
         checkCamera()
     }
 
+    /// Queries the camera state in the background; the system call can be slow.
     private func checkCamera() {
-        if CameraMonitor.isAnyCameraRunning() {
+        guard !cameraCheckRunning else { return }
+        cameraCheckRunning = true
+        Task {
+            let running = await Task.detached(priority: .utility) {
+                CameraMonitor.isAnyCameraRunning()
+            }.value
+            cameraCheckRunning = false
+            guard cameraEnabled else { return }
+            cameraChanged(running)
+        }
+    }
+
+    private func cameraChanged(_ running: Bool) {
+        if running {
             cameraIdleCount = 0
             guard !cameraActive else { return }
             cameraActive = true
@@ -405,27 +485,32 @@ final class LightStore: ObservableObject {
 
     private func setAway(_ reason: AwayReason, _ active: Bool) {
         let wasAway = !awayReasons.isEmpty
-        if active { awayReasons.insert(reason) } else { awayReasons.remove(reason) }
+        if active {
+            guard reason == .idle ? idleOffEnabled : sleepOffEnabled else { return }
+            awayReasons.insert(reason)
+        } else {
+            awayReasons.remove(reason)
+        }
         let isAway = !awayReasons.isEmpty
         if isAway && !wasAway {
-            wentAway()
+            // No fade before sleep: the Mac may be asleep before a fade would finish.
+            wentAway(animated: reason == .idle)
         } else if !isAway && wasAway {
             cameBack()
         }
     }
 
-    private func wentAway() {
+    private func wentAway(animated: Bool) {
         wakeTask?.cancel()
-        guard sleepOffEnabled, isOn else { return }
+        guard isOn else { return }
         sleepTurnedOff = true
-        // No fade here: the Mac may be asleep before a fade would finish.
-        switchLight(on: false, animated: false)
+        switchLight(on: false, animated: animated)
     }
 
     private func cameBack() {
         guard sleepTurnedOff else { return }
         sleepTurnedOff = false
-        guard sleepOffEnabled, wakeRestoreEnabled else { return }
+        guard wakeRestoreEnabled else { return }
         wakeTask?.cancel()
         wakeTask = Task {
             // The network may need a moment after waking up.
@@ -439,12 +524,49 @@ final class LightStore: ObservableObject {
         }
     }
 
+    // MARK: Idle
+
+    private func updateIdleTimer() {
+        idleTimer?.invalidate()
+        idleTimer = nil
+        guard idleOffEnabled else {
+            setAway(.idle, false)
+            return
+        }
+        idleTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkIdle() }
+        }
+        idleTimer?.tolerance = 1
+    }
+
+    private func checkIdle() {
+        // Seconds since the last keyboard or mouse input of any kind.
+        let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState,
+                                                           eventType: CGEventType(rawValue: ~0)!)
+        let isIdleAway = awayReasons.contains(.idle)
+        if idle < Double(idleMinutes * 60) {
+            if isIdleAway { setAway(.idle, false) }
+        } else if !isIdleAway && isOn && !idleCheckRunning {
+            // Watching or presenting on camera is not "away", even without input.
+            idleCheckRunning = true
+            Task {
+                let cameraRunning = await Task.detached(priority: .utility) {
+                    CameraMonitor.isAnyCameraRunning()
+                }.value
+                idleCheckRunning = false
+                if !cameraRunning && idleOffEnabled { setAway(.idle, true) }
+            }
+        }
+    }
+
     // MARK: Schedule
 
     private func tick() {
         let now = Date()
         if scheduleEnabled { runSchedules(from: lastScheduleCheck, to: now) }
         lastScheduleCheck = now
+        usage.record(isOn: isOn && reachable)
+        applyDayCycle()
         Task { await refresh() }
     }
 
@@ -474,11 +596,17 @@ final class LightStore: ObservableObject {
         lastScheduleEvent = "\(f.string(from: Date())): \(entry.action.label)"
     }
 
+    /// Next rule to fire. Cached, because views ask for it on every redraw.
     var nextScheduled: (ScheduleEntry, Date)? {
         guard scheduleEnabled else { return nil }
         let now = Date()
-        return schedules.compactMap { e in e.nextFire(after: now).map { (e, $0) } }
+        if let cache = nextCache, now < cache.validUntil { return cache.value }
+        let value = schedules.compactMap { e in e.nextFire(after: now).map { (e, $0) } }
             .min { $0.1 < $1.1 }
+        var validUntil = now.addingTimeInterval(60)
+        if let fire = value?.1, fire < validUntil { validUntil = fire }
+        nextCache = (validUntil, value)
+        return value
     }
 
     func addSchedule() { schedules.append(ScheduleEntry()) }

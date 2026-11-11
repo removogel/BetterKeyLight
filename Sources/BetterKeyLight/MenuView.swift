@@ -34,13 +34,13 @@ struct MenuView: View {
             .buttonStyle(.borderless)
         }
         .padding(16)
-        .frame(width: 300)
+        .frame(width: 320)
         .task { await store.refresh() }
     }
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(nsImage: MenuBarIcon.make(on: store.isOn, size: 26))
+            Image(nsImage: MenuBarIcon.header(on: store.isOn))
                 .renderingMode(.template)
                 .foregroundStyle(store.isOn ? .yellow : .secondary)
                 .frame(width: 28)
@@ -72,7 +72,7 @@ struct MenuView: View {
 
     private var statusText: String {
         if store.host.isEmpty { return "Not configured" }
-        if store.reachable { return "Connected · \(store.host)" }
+        if store.reachable { return "Connected" }
         return store.lastError ?? "Not reachable"
     }
 
@@ -81,22 +81,33 @@ struct MenuView: View {
             LabeledSlider(title: "Brightness",
                           valueText: "\(Int(store.brightness)) %",
                           minIcon: "sun.min", maxIcon: "sun.max.fill") {
-                Slider(value: $store.brightness, in: 3...100, step: 1)
+                // No `step:` here: macOS would draw a tick mark for every step, which is slow.
+                Slider(value: Binding(get: { store.brightness },
+                                      set: { store.brightness = $0.rounded() }),
+                       in: 3...100)
                     .onChange(of: store.brightness) { store.valuesChanged() }
             }
-            LabeledSlider(title: "Color temperature",
-                          valueText: "\(Int(store.kelvin)) K",
-                          minIcon: "flame", maxIcon: "snowflake") {
-                Slider(value: $store.kelvin, in: ColorTemp.kelvinRange, step: 50)
-                    .onChange(of: store.kelvin) { store.valuesChanged() }
-            }
-            HStack {
-                ForEach([10, 25, 50, 75, 100], id: \.self) { v in
-                    Button("\(v)%") {
-                        store.switchLight(on: true, brightness: Double(v))
+            HStack(spacing: 4) {
+                ForEach([5, 10, 25, 50, 75, 100], id: \.self) { level in
+                    Button {
+                        store.switchLight(on: true, brightness: Double(level))
+                    } label: {
+                        Text("\(level)%")
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .frame(maxWidth: .infinity)
                     }
                     .controlSize(.small)
                 }
+            }
+            .padding(.bottom, 4)
+            LabeledSlider(title: "Color temperature",
+                          valueText: "\(Int(store.kelvin)) K",
+                          minIcon: "flame", maxIcon: "snowflake") {
+                Slider(value: Binding(get: { store.kelvin },
+                                      set: { store.kelvin = ($0 / 50).rounded() * 50 }),
+                       in: ColorTemp.kelvinRange)
+                    .onChange(of: store.kelvin) { store.valuesChanged() }
             }
         }
         .disabled(!store.isOn)
@@ -108,25 +119,36 @@ struct MenuView: View {
         if !store.presets.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Presets").font(.subheadline)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)],
-                          alignment: .leading, spacing: 6) {
-                    ForEach(store.presets) { preset in
-                        let active = store.isActive(preset)
-                        Button {
-                            store.applyPreset(preset)
-                        } label: {
-                            Text(preset.name)
-                                .lineLimit(1)
-                                .frame(maxWidth: .infinity)
+                let all = store.presets
+                let rows = stride(from: 0, to: all.count, by: 3).map { start in
+                    Array(all[start..<min(start + 3, all.count)])
+                }
+                VStack(spacing: 6) {
+                    ForEach(rows.indices, id: \.self) { index in
+                        HStack(spacing: 6) {
+                            ForEach(rows[index]) { preset in
+                                presetButton(preset)
+                            }
                         }
-                        .controlSize(.small)
-                        .background(active ? Color.accentColor.opacity(0.3) : Color.clear,
-                                    in: RoundedRectangle(cornerRadius: 5))
-                        .help("\(preset.brightness) % · \(preset.kelvin) K")
                     }
                 }
             }
         }
+    }
+
+    private func presetButton(_ preset: Preset) -> some View {
+        let active = store.isActive(preset)
+        return Button {
+            store.applyPreset(preset)
+        } label: {
+            Text(preset.name)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity)
+        }
+        .controlSize(.small)
+        .background(active ? Color.accentColor.opacity(0.3) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 5))
+        .help("\(preset.brightness) % · \(preset.kelvin) K")
     }
 
     @ViewBuilder

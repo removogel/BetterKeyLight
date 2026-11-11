@@ -6,7 +6,13 @@ enum MenuBarIcon {
     static let on = make(on: true, size: 18)
     static let off = make(on: false, size: 18)
 
+    private static let largeOn = make(on: true, size: 26)
+    private static let largeOff = make(on: false, size: 26)
+
     static func image(on isOn: Bool) -> NSImage { isOn ? on : off }
+
+    /// Larger version for the header of the menu.
+    static func header(on isOn: Bool) -> NSImage { isOn ? largeOn : largeOff }
 
     static func make(on isOn: Bool, size: CGFloat) -> NSImage {
         let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in

@@ -11,8 +11,10 @@ struct SettingsView: View {
                 .tabItem { Label("Automation", systemImage: "wand.and.stars") }
             ScheduleSettings()
                 .tabItem { Label("Schedule", systemImage: "clock") }
+            UsageSettings()
+                .tabItem { Label("Usage", systemImage: "chart.bar") }
         }
-        .frame(width: 540, height: 520)
+        .frame(width: 560, height: 560)
     }
 }
 
@@ -186,8 +188,8 @@ struct PresetRow: View {
             HStack {
                 Image(systemName: "sun.max").foregroundStyle(.secondary).frame(width: 18)
                 Slider(value: Binding(get: { Double(preset.brightness) },
-                                      set: { preset.brightness = Int($0) }),
-                       in: 3...100, step: 1)
+                                      set: { preset.brightness = Int($0.rounded()) }),
+                       in: 3...100)
                 Text("\(preset.brightness) %")
                     .monospacedDigit()
                     .frame(width: 60, alignment: .trailing)
@@ -195,8 +197,8 @@ struct PresetRow: View {
             HStack {
                 Image(systemName: "thermometer.medium").foregroundStyle(.secondary).frame(width: 18)
                 Slider(value: Binding(get: { Double(preset.kelvin) },
-                                      set: { preset.kelvin = Int($0) }),
-                       in: ColorTemp.kelvinRange, step: 50)
+                                      set: { preset.kelvin = Int(($0 / 50).rounded()) * 50 }),
+                       in: ColorTemp.kelvinRange)
                 Text("\(String(preset.kelvin)) K")
                     .monospacedDigit()
                     .frame(width: 60, alignment: .trailing)
@@ -210,11 +212,29 @@ struct PresetRow: View {
 
 struct AutomationSettings: View {
     @EnvironmentObject var store: LightStore
+    @State private var launchAtLogin = false
 
     var body: some View {
         Form {
             Section("Switching") {
                 Toggle("Fade smoothly when turning on or off", isOn: $store.fadeEnabled)
+            }
+
+            Section("Color temperature over the day") {
+                Toggle("Follow the time of day", isOn: $store.dayCycleEnabled)
+                KelvinRow(title: "Daytime", value: $store.dayKelvin)
+                    .disabled(!store.dayCycleEnabled)
+                KelvinRow(title: "Night", value: $store.nightKelvin)
+                    .disabled(!store.dayCycleEnabled)
+                DatePicker("Fully cool by", selection: timeBinding($store.dayStartMinutes),
+                           displayedComponents: .hourAndMinute)
+                    .disabled(!store.dayCycleEnabled)
+                DatePicker("Fully warm by", selection: timeBinding($store.nightStartMinutes),
+                           displayedComponents: .hourAndMinute)
+                    .disabled(!store.dayCycleEnabled)
+                Text("The color temperature changes gradually over the two hours before each time. Moving the color temperature slider or applying a preset pauses this until the light is next switched on.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Camera") {
@@ -231,19 +251,121 @@ struct AutomationSettings: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Sleep") {
+            Section("Away") {
                 Toggle("Turn off when the Mac sleeps or the screen locks", isOn: $store.sleepOffEnabled)
-                Toggle("Turn back on after waking or unlocking", isOn: $store.wakeRestoreEnabled)
-                    .disabled(!store.sleepOffEnabled)
+                Toggle("Turn off when there is no keyboard or mouse input", isOn: $store.idleOffEnabled)
+                Picker("After", selection: $store.idleMinutes) {
+                    ForEach([2, 5, 10, 15, 30, 60], id: \.self) { minutes in
+                        Text("\(minutes) minutes").tag(minutes)
+                    }
+                }
+                .disabled(!store.idleOffEnabled)
+                Toggle("Turn back on when I return", isOn: $store.wakeRestoreEnabled)
+                    .disabled(!store.sleepOffEnabled && !store.idleOffEnabled)
+                Text("The light stays on without input while the camera is in use.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("General") {
                 Toggle("Launch at login", isOn: Binding(
-                    get: { store.launchAtLogin },
-                    set: { store.launchAtLogin = $0 }))
+                    get: { launchAtLogin },
+                    set: {
+                        store.launchAtLogin = $0
+                        launchAtLogin = store.launchAtLogin
+                    }))
             }
         }
         .formStyle(.grouped)
+        .onAppear { launchAtLogin = store.launchAtLogin }
+    }
+
+    /// Edits a minute-of-day value with a time picker.
+    private func timeBinding(_ minutes: Binding<Int>) -> Binding<Date> {
+        Binding {
+            let value = minutes.wrappedValue
+            return Calendar.current.date(from: DateComponents(hour: value / 60, minute: value % 60)) ?? Date()
+        } set: { date in
+            let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+            minutes.wrappedValue = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+        }
+    }
+}
+
+struct KelvinRow: View {
+    let title: String
+    @Binding var value: Int
+
+    var body: some View {
+        HStack {
+            Text(title).frame(width: 70, alignment: .leading)
+            Slider(value: Binding(get: { Double(value) },
+                                  set: { value = Int(($0 / 50).rounded()) * 50 }),
+                   in: ColorTemp.kelvinRange)
+            Text("\(String(value)) K")
+                .monospacedDigit()
+                .frame(width: 60, alignment: .trailing)
+        }
+    }
+}
+
+// MARK: - Usage
+
+struct UsageSettings: View {
+    @EnvironmentObject var store: LightStore
+
+    var body: some View {
+        UsageView(usage: store.usage)
+    }
+}
+
+struct UsageView: View {
+    @ObservedObject var usage: UsageStats
+    @State private var confirmReset = false
+
+    var body: some View {
+        let days = usage.lastDays(14)
+        let week = days.suffix(7).reduce(0) { $0 + $1.seconds }
+        let peak = max(days.map(\.seconds).max() ?? 0, 3600)
+
+        Form {
+            Section("Light on") {
+                LabeledContent("Today", value: UsageStats.format(days.last?.seconds ?? 0))
+                LabeledContent("Last 7 days", value: UsageStats.format(week))
+                LabeledContent("Daily average (7 days)", value: UsageStats.format(week / 7))
+            }
+
+            Section("Last 14 days") {
+                HStack(alignment: .bottom, spacing: 6) {
+                    ForEach(days) { day in
+                        VStack(spacing: 4) {
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color.accentColor)
+                                .frame(height: max(2, 120 * day.seconds / peak))
+                            Text(String(Calendar.current.component(.day, from: day.date)))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .help(UsageStats.format(day.seconds))
+                    }
+                }
+                .frame(height: 150, alignment: .bottom)
+            }
+
+            Section {
+                Text("Time is only counted while BetterKeyLight is running.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Reset Statistics …", role: .destructive) { confirmReset = true }
+            }
+        }
+        .formStyle(.grouped)
+        .confirmationDialog("Reset usage statistics?", isPresented: $confirmReset) {
+            Button("Reset", role: .destructive) { usage.reset() }
+        } message: {
+            Text("This permanently deletes the recorded usage times.")
+        }
     }
 }
 
@@ -345,8 +467,8 @@ struct ScheduleRow: View {
                 HStack {
                     Toggle("Set brightness", isOn: $entry.setBrightness)
                     Slider(value: Binding(get: { Double(entry.brightness) },
-                                          set: { entry.brightness = Int($0) }),
-                           in: 3...100, step: 1)
+                                          set: { entry.brightness = Int($0.rounded()) }),
+                           in: 3...100)
                         .disabled(!entry.setBrightness)
                     Text("\(entry.brightness) %")
                         .monospacedDigit()
