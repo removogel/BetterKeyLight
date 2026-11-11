@@ -29,14 +29,21 @@ Requires macOS 14 (Sonoma) or later. There is no version for Windows, Linux, iOS
 
 Camera coupling, sleep handling, idle switch-off and the day cycle are off by default; enable them under Settings → Automation.
 
-## Build
+## Download
+
+Get `BetterKeyLight-<version>.zip` from the [Releases](https://github.com/removogel/BetterKeyLight/releases) page, unzip it and drag `BetterKeyLight.app` to `/Applications`. The app runs on Apple silicon and Intel Macs.
+
+The app is not notarized by Apple, so macOS blocks the first launch. Open it once, dismiss the warning, then go to System Settings → Privacy & Security and click "Open Anyway".
+
+## Build from source
 
 ```bash
 ./build.sh
 ```
 
-This produces `build/BetterKeyLight.app`. Drag it to `/Applications` and launch it.
-Only the Xcode Command Line Tools are required.
+This produces `build/BetterKeyLight.app`. Only the Xcode Command Line Tools are required.
+
+Every push to `main` and every published release is also built by GitHub Actions; a release gets the app attached automatically.
 
 ## Notes
 

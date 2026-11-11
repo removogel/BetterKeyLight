@@ -1,0 +1,38 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal app (Apple silicon + Intel)
+        run: UNIVERSAL=1 ./build.sh
+
+      - name: Package
+        run: ditto -c -k --keepParent build/BetterKeyLight.app BetterKeyLight.zip
+
+      - name: Keep the app as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BetterKeyLight
+          path: BetterKeyLight.zip
+
+      - name: Attach the app to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          cp BetterKeyLight.zip "BetterKeyLight-${TAG#v}.zip"
+          gh release upload "$TAG" "BetterKeyLight-${TAG#v}.zip" --clobber
